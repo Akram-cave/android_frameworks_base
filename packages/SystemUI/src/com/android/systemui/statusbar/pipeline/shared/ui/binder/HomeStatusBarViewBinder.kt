@@ -106,6 +106,7 @@ constructor(
         val autoHide: Boolean,
         val denyListed: Boolean,
         val hideForHun: Boolean,
+        val dynamicIslandEnabled: Boolean,
         val position: Int,
         val visibilityModel: VisibilityModel,
     )
@@ -151,6 +152,7 @@ constructor(
                             autoHide = false,
                             denyListed = false,
                             hideForHun = false,
+                            dynamicIslandEnabled = context.contentResolver.readDynamicIslandEnabled(),
                             position = context.contentResolver.readClockPosition(),
                             visibilityModel = VisibilityModel(View.GONE, true),
                         )
@@ -164,6 +166,10 @@ constructor(
                     Settings.Secure.getUriFor(StatusBarIconController.ICON_HIDE_LIST)
                 val statusBarClockUri: Uri =
                     LineageSettings.System.getUriFor(LineageSettings.System.STATUS_BAR_CLOCK)
+                val dynamicIslandUri: Uri =
+                    LineageSettings.System.getUriFor(
+                        LineageSettings.System.STATUS_BAR_SHOW_DYNAMIC_ISLAND
+                    )
 
                 val taskStackListener =
                     object : TaskStackChangeListener {
@@ -230,13 +236,19 @@ constructor(
                                         current.copy(
                                             position = context.contentResolver.readClockPosition()
                                         )
+                                    dynamicIslandUri ->
+                                        current.copy(
+                                            dynamicIslandEnabled =
+                                                context.contentResolver.readDynamicIslandEnabled()
+                                        )
                                     else -> current
                                 }
                             }
                         }
                     }
 
-                val urisToObserve = listOf(clockAutoHideUri, iconHideListUri, statusBarClockUri)
+                val urisToObserve =
+                    listOf(clockAutoHideUri, iconHideListUri, statusBarClockUri, dynamicIslandUri)
                 urisToObserve.forEach { uri ->
                     context.contentResolver.registerContentObserver(
                         uri,
@@ -469,7 +481,9 @@ constructor(
                                     state.visibilityModel.visibility == View.VISIBLE &&
                                         !hunBlocksClock &&
                                         !state.autoHide &&
-                                        !state.denyListed
+                                        !state.denyListed &&
+                                        !(state.position == CLOCK_POSITION_CENTER &&
+                                            state.dynamicIslandEnabled)
                                 ) {
                                     state.visibilityModel
                                 } else {
@@ -502,26 +516,34 @@ constructor(
                     }
 
                     launch {
-                        viewModel.systemInfoCombinedVis.collect { (baseVis, animState) ->
-                            // Broadly speaking, the baseVis controls the view.visibility, and
-                            // the animation state uses only alpha to achieve its effect. This
-                            // means that we can always modify the visibility, and if we're
-                            // animating we can use the animState to handle it. If we are not
-                            // animating, then we can use the baseVis default animation
+                        combine(
+                            viewModel.systemInfoCombinedVis,
+                            clockState,
+                            ::Pair,
+                        ).collect { (systemInfo, state) ->
+                            val (baseVis, animState) = systemInfo
+                            val centerVis =
+                                if (state.dynamicIslandEnabled) {
+                                    baseVis.copy(visibility = View.GONE)
+                                } else {
+                                    baseVis
+                                }
                             if (animState.isAnimatingChip()) {
-                                // Just apply the visibility of the view, but don't animate
-                                networkTrafficCenterView.visibility = baseVis.visibility
+                                networkTrafficCenterView.visibility = centerVis.visibility
                                 networkTrafficStartView.visibility = baseVis.visibility
                                 systemInfoView.visibility = baseVis.visibility
-                                // Now apply the animation state, with its animator
                                 when (animState) {
                                     AnimatingIn -> {
-                                        systemEventChipAnimateIn?.invoke(networkTrafficCenterView)
+                                        if (!state.dynamicIslandEnabled) {
+                                            systemEventChipAnimateIn?.invoke(networkTrafficCenterView)
+                                        }
                                         systemEventChipAnimateIn?.invoke(networkTrafficStartView)
                                         systemEventChipAnimateIn?.invoke(systemInfoView)
                                     }
                                     AnimatingOut -> {
-                                        systemEventChipAnimateOut?.invoke(networkTrafficCenterView)
+                                        if (!state.dynamicIslandEnabled) {
+                                            systemEventChipAnimateOut?.invoke(networkTrafficCenterView)
+                                        }
                                         systemEventChipAnimateOut?.invoke(networkTrafficStartView)
                                         systemEventChipAnimateOut?.invoke(systemInfoView)
                                     }
@@ -530,7 +552,7 @@ constructor(
                                     }
                                 }
                             } else {
-                                networkTrafficCenterView.adjustVisibility(baseVis)
+                                networkTrafficCenterView.adjustVisibility(centerVis)
                                 networkTrafficStartView.adjustVisibility(baseVis)
                                 systemInfoView.adjustVisibility(baseVis)
                             }
@@ -597,6 +619,15 @@ constructor(
             CLOCK_POSITION_LEFT,
             UserHandle.USER_CURRENT,
         )
+    }
+
+    private fun ContentResolver.readDynamicIslandEnabled(): Boolean {
+        return LineageSettings.System.getIntForUser(
+            this,
+            LineageSettings.System.STATUS_BAR_SHOW_DYNAMIC_ISLAND,
+            0,
+            UserHandle.USER_CURRENT,
+        ) != 0
     }
 
     private fun shouldClockAutoHideForCurrentTask(): Boolean {
